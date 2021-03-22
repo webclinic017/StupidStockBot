@@ -2,6 +2,7 @@ import numpy as np
 from datetime import date
 from datetime import timedelta
 import yfinance as yf
+import consolecontrol as console
 
 
 class SanityCheck:
@@ -17,7 +18,9 @@ class SanityCheck:
         self.slopeLong = 0.00
         self.slopeShort = 0.00
         self.log = []
+        print('Verifying long and short stocks for bull/bear trend over last year...')
         self._verify_long_and_short()
+        print('Verifying long/short ticker symmetry...')
         self._verify_ticker_symmetry()
         if self.isPass:
             self._get_monitoring_interval()
@@ -35,29 +38,29 @@ class SanityCheck:
         iVal = inVec[0]
         return [((i - iVal) / iVal) * 100 for i in inVec]
 
-
+    @console.BlockPrinting
     def _verify_long_and_short(self):
         '''Verify tickers are actually long and short, else swap'''
-        print('Verifying long and short stocks for bull/bear trend over last year...')
         oneYearLong = yf.download(self.longTicker, start=self.currentDate - timedelta(days=365), end=self.currentDate,
-                                  interval='1wk')
+                                  interval='1d')
         oneYearShort = yf.download(self.shortTicker, start=self.currentDate - timedelta(days=365), end=self.currentDate,
-                                   interval='1wk')
+                                   interval='1d')
         self.slopeLong = self.__calc_slope([i for i in range(len(oneYearLong.index.values))], self.__vec_to_percent(oneYearLong.Close.values))
         self.slopeShort = self.__calc_slope([i for i in range(len(oneYearShort.index.values))], self.__vec_to_percent(oneYearShort.Close.values))
         if self.slopeLong > 0 and self.slopeShort > 0:
-            self.log.append(f'Neither ticker is a short(bear) stock. Swap strategy turned off.')
+            self.log.append(f'> Neither ticker is a short(bear) stock. Swap strategy turned off.')
         elif self.slopeLong < 0 and self.slopeShort < 0:
-            self.log.append(f'Neither ticker is a long(bull) stock.')
+            self.log.append(f'> Neither ticker is a long(bull) stock.')
         elif self.slopeShort > self.slopeLong:
             # Swap tickers if long case on input is incorrect over 1 yr period
             self.longTicker, self.shortTicker = [self.shortTicker, self.longTicker]
-            self.log.append(f'1 yr Bull and Bear case for input tickers is incorrect.')
+            self.log.append(f'> 1 yr Bull and Bear case for input tickers is incorrect.')
         else:
-            self.log.append(f'1 yr Bull and Bear case for input tickers is confirmed.')
+            self.log.append(f'> 1 yr Bull and Bear case for input tickers is confirmed.')
         self.log[-1] += f' Long Ticker: {self.longTicker} | Short Ticker: {self.shortTicker}'
         return
 
+    @console.BlockPrinting
     def _verify_ticker_symmetry(self):
         '''Verify Long and Short tickers have approximate mirror symmetry'''
         if (self.slopeLong > 0 and self.slopeShort > 0) or (self.slopeLong < 0 and self.slopeShort < 0):
@@ -75,6 +78,7 @@ class SanityCheck:
         tickShort = self.__vec_to_percent(np.nan_to_num(oneMonthShort.Close))
         self.tickerPercentSymmetry = 100 - np.average((tickLong + tickShort))
         self.tickersAreSymmetric = False if self.tickerPercentSymmetry < 90 else True
+        self.log.append(f'> Average Long/Short Ticker Symmetry (last 30 days): {str(self.tickerPercentSymmetry)[:5]} %')
         return
 
     def _get_monitoring_interval(self):
@@ -86,9 +90,9 @@ class SanityCheck:
         deltaSixtyDaysWeekly = []
         deltaSixtyDaysMonthly = []
 
+        @console.BlockPrinting
         def __get_last_60_days_of_data():
             '''Query last 60 days of daily trading data'''
-            print(f'querying yahoo finance for {self.longTicker} daily data over last 60 days')
             for i in reversed(range(0, 60, 1)):
                 queryDate = currentDate - timedelta(days=i)
                 if queryDate.weekday() >= 5:
@@ -109,7 +113,7 @@ class SanityCheck:
             if intradaycount / len(deltaSixtyDaysIntraDay) >= 0.5:
                 self.monitorInterval = '1d'
             self.log.append(
-                f'{intradaycount} / {len(deltaSixtyDaysIntraDay)} days meet trade threshold in intraday trading')
+                f'\t{intradaycount} / {len(deltaSixtyDaysIntraDay)} days meet trade threshold in intraday trading')
             return
 
         def __check_weekly_frequency():
@@ -123,7 +127,7 @@ class SanityCheck:
             weeklycount = len([i for i in deltaSixtyDaysWeekly if i > self.minTradeDeltaPercent])
             if weeklycount / len(deltaSixtyDaysWeekly) >= 0.5 and self.monitorInterval is None:
                 self.monitorInterval = '5d'
-            self.log.append(f'{weeklycount} / {len(deltaSixtyDaysWeekly)} weeks (5day) '
+            self.log.append(f'\t{weeklycount} / {len(deltaSixtyDaysWeekly)} weeks (5day) '
                             f'meet trade threshold in weekly trading')
             return
 
@@ -137,21 +141,23 @@ class SanityCheck:
                 deltaSixtyDaysMonthly.append((np.max(month) - np.min(month)) / np.min(month) * 100)
             monthlycount = len([i for i in deltaSixtyDaysMonthly if i > self.minTradeDeltaPercent])
             self.log.append(
-                f'{monthlycount} / {len(deltaSixtyDaysMonthly)} months (20day) meet trade threshold in monthly trading')
+                f'\t{monthlycount} / {len(deltaSixtyDaysMonthly)} months (20day) meet trade threshold in monthly trading')
             if self.monitorInterval is None:
                 if monthlycount / len(deltaSixtyDaysMonthly) >= 0.5:
                     self.monitorInterval = '1mo'
                 else:
                     self.monitorInterval = '1y'
-                    self.log.append('Analysis suggests that the trade settings are not appropriate for the desired '
-                                    'tickers. Advise against using this script with current settings.')
+                    self.log.append('!!! Analysis suggests that the trade settings are not appropriate for the desired '
+                                    'tickers. Advise against using this script with current settings !!!')
                     self.isPass = False
             return
 
+        print(f'> querying yahoo finance for {self.longTicker} daily data over last 60 days')
+        self.log.append('place holder')
+        place_holder_idx = len(self.log)-1
         __get_last_60_days_of_data()
         __check_daily_frequency()
         __check_weekly_frequency()
         __check_monthly_frequency()
-        self.log.append(f'Data monitoring interval set to: {self.monitorInterval} using a minimum'
-                        f' trade delta of: {self.minTradeDeltaPercent}%')
+        self.log[place_holder_idx]=f'> Data monitoring interval set to: {self.monitorInterval} using a minimum trade delta of: {self.minTradeDeltaPercent}%'
         return
