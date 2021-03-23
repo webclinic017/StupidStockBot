@@ -2,6 +2,7 @@
 import os
 import json
 from rauth import OAuth1Service
+from rauth.session import OAuth1Session
 import undetected_chromedriver.v2 as uc
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
@@ -98,7 +99,9 @@ class CurrentAccount(object):
 
 
 class Etrader():
-    def __init__(self,  production=False):
+    def __init__(self,  production=False, use_cached_session=True):
+        self.use_cached_session = use_cached_session
+        self.cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache.txt')
         self.consumer_key = secret.CONSUMER_KEY_PROD if production else secret.CONSUMER_KEY_DEV
         self.consumer_secret = secret.CONSUMER_SECRET_PROD if production else secret.CONSUMER_SECRET_DEV
         self.web_username = secret.WEB_USERNAME
@@ -132,40 +135,51 @@ class Etrader():
 
     def __exit__(self, exc_type, exc_value, traceback):
         '''Cleanup when object is destroyd'''
-        self.revoke_accesss_token()
+        if not self.use_cached_session:
+            self.revoke_accesss_token()
+            if os.path.isfile(self.cache_file):
+                os.remove(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache.txt'))
         return
 
     def __authorization(self):
-        cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'con.cache')
-
+        '''Authorize user session form cache if enabled or create new session'''
         def __retrieve_connection_cache():
-            if os.path.isfile(cache_file):
-                with open(cache_file, 'r') as infile:
+            '''If previous session was cached and not destroyed, try to reopen session'''
+            if os.path.isfile(self.cache_file):
+                with open(self.cache_file, 'r') as infile:
                     con_cache = json.load(infile)
                     self.oauth_token = con_cache['oauth_token']
                     self.oauth_token_secret = con_cache['oauth_token_secret']
                     self.service.authorize_url = con_cache['authorize_url']
                     self.verifier = con_cache['verifier']
-                    self.session = OAuth1Service(**json.loads(con_cache['session']))
+                    self.session = OAuth1Session(**json.loads(json.dumps(con_cache['session'])))
                 return True
             return False
 
         def __test_connection():
+            '''test cached session validity by attempting to renew token'''
             res = self.renew_accesss_token()
             if res.status_code == 200:
+                print('Using cached session.')
                 return
+            print('Cached session has expired.')
             __new_authorization()
             return
 
         def __new_authorization():
+            '''New authorization'''
+            print('Starting new session authorization...')
             self.oauth_token, self.oauth_token_secret = self.service.get_request_token(params={'oauth_callback': 'oob', 'format': 'json'})
             self.service.authorize_url = self.service.authorize_url.format(self.consumer_key, self.oauth_token)
-            self.verifier = self.__get_verifier(headless=False, action_delay_sec=2)
+            self.verifier = self.__get_verifier(headless=True, action_delay_sec=2)
             self.session = self.service.get_auth_session(self.oauth_token, self.oauth_token_secret, params={'oauth_verifier': self.verifier})
             return
 
         def __set_connection_cache():
-            with open(cache_file, 'w') as outfile:
+            '''Write session parameters to disk if caching is enabled'''
+            if os.path.isfile(self.cache_file):
+                os.remove(self.cache_file)
+            with open(self.cache_file, 'w') as outfile:
                 outfile.write(json.dumps({'oauth_token': self.oauth_token,
                            'oauth_token_secret': self.oauth_token_secret,
                            'authorize_url': self.service.authorize_url,
@@ -176,11 +190,14 @@ class Etrader():
                                        'access_token_secret': self.session.access_token_secret}}))
             return
 
-        if __retrieve_connection_cache():
-            __test_connection()
-        else:
+        if not self.use_cached_session: # if not caching sessions, always get new token and never write to disk
             __new_authorization()
-        __set_connection_cache()
+            return
+        elif __retrieve_connection_cache(): # If using cache, test current values by attempting to renew previous token
+            __test_connection()
+        else: # If token renewal fails, session has expired, so go through new authorization
+            __new_authorization()
+        __set_connection_cache() # write connection parameters to disk and update class variables with renewed or new session
         return
 
     def check_token(self):
