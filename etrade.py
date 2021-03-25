@@ -12,96 +12,14 @@ from datetime import timedelta
 import time
 import pprint
 import secret
-
-
-class CurrentAccount(object):
-    def __init__(self, account_list=None):
-        self.id = None
-        self.id_key = None
-        self.description = None
-        self.mode = None
-        self.name = None
-        self.status = None
-        self.type = None
-        self.institution_type = None
-        self.closed_date = None
-        self.cash_available = None
-        self.positions = None
-        self.total_account_value = None
-        self.__account_list = account_list
-
-    def __call__(self):
-        return self.get()
-
-    def get(self):
-        return {'id': self.id, 'id_key': self.id_key, 'description': self.description, 'mode': self.mode,
-                'name': self.name, 'status': self.status, 'type': self.type,
-                'institution_type': self.institution_type, 'closed_date': self.closed_date,
-                'cash_available': self.cash_available, 'total_account_value': self.total_account_value,
-                'positions': self.positions}
-
-    def set(self, account_dict):
-        self.id = account_dict['accountId'] if 'accountId' in account_dict else None
-        self.id_key = account_dict['accountIdKey'] if 'accountIdKey' in account_dict else None
-        self.description = account_dict['accountDesc'] if 'accountDesc' in account_dict else None
-        self.mode = account_dict['accountMode'] if 'accountMode' in account_dict else None
-        self.name = account_dict['accountName'] if 'accountName' in account_dict else None
-        self.status = account_dict['accountStatus'] if 'accountStatus' in account_dict else None
-        self.type = account_dict['accountType'] if 'accountType' in account_dict else None
-        self.institution_type = account_dict['institutionType'] if 'institutionType' in account_dict else None
-        self.closed_date = account_dict['closedDate'] if 'closedDate' in account_dict else None
-        if 'cashAvailable' in account_dict:
-            self.cash_available = account_dict['cashAvailable']
-        if 'positions' in account_dict:
-            self.positions = account_dict['positions']
-        if 'totalAccountValue' in account_dict:
-            self.total_account_value = account_dict['totalAccountValue']
-        return
-
-    def set_by_id(self, id):
-        account_dict = None
-        idx = 0
-        for i in range(len(self.__account_list)):
-            if self.__account_list[i]['accountId'] == id:
-                account_dict = self.__account_list[i]
-                idx = i
-                break
-        if account_dict is None:
-            raise ValueError(f'Invalid account ID: {id}')
-        else:
-            self.set(self.__account_list[idx])
-        return
-
-    def set_by_id_key(self, id_key):
-        account_dict = None
-        idx = 0
-        for i in range(len(self.__account_list)):
-            if self.__account_list[i]['accountIdKey'] == id_key:
-                account_dict = self.__account_list[i]
-                idx = i
-                break
-        if account_dict is None:
-            raise ValueError(f'Invalid account ID Key: {id_key}')
-        else:
-            self.set(self.__account_list[idx])
-        return
-
-    def set_by_index(self, index):
-        try:
-            self.set(self.__account_list[index])
-        except Exception as e:
-            raise ValueError(f'Account index is out of range. Expecting value between 0 and {len(self.__account_list)}')
-        return
-
-    def update_account_list(self, account_list):
-        self.__account_list = account_list
-        return
+from threading import *
+import msgpack
 
 
 class Etrader():
     def __init__(self,  production=False, use_cached_session=True):
         self.use_cached_session = use_cached_session
-        self.cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache.txt')
+        self.cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache.bin')
         self.consumer_key = secret.CONSUMER_KEY_PROD if production else secret.CONSUMER_KEY_DEV
         self.consumer_secret = secret.CONSUMER_SECRET_PROD if production else secret.CONSUMER_SECRET_DEV
         self.web_username = secret.WEB_USERNAME
@@ -125,9 +43,10 @@ class Etrader():
         self.verifier = None
         self.session = None
         self.__authorization()
-        self.current_account = CurrentAccount()
+        self.current_account = self.__CurrentAccount()
         self.account_list = self.get_list_of_accounts()
         self.current_account.set_by_index(0)
+        Timer(3600, self.auto_renew_token).start() # in new thread, after 1 hour start checking token every hour
 
     def __enter__(self):
         '''Permit WITH instantiation'''
@@ -146,13 +65,17 @@ class Etrader():
         def __retrieve_connection_cache():
             '''If previous session was cached and not destroyed, try to reopen session'''
             if os.path.isfile(self.cache_file):
-                with open(self.cache_file, 'r') as infile:
-                    con_cache = json.load(infile)
-                    self.oauth_token = con_cache['oauth_token']
-                    self.oauth_token_secret = con_cache['oauth_token_secret']
-                    self.service.authorize_url = con_cache['authorize_url']
-                    self.verifier = con_cache['verifier']
-                    self.session = OAuth1Session(**json.loads(json.dumps(con_cache['session'])))
+                with open(self.cache_file, "rb") as cache_data:
+                    byte_data = cache_data.read()
+                    try:
+                        con_data = msgpack.unpackb(byte_data)
+                    except Exception as e:
+                        return False
+                    self.oauth_token = con_data['oauth_token']
+                    self.oauth_token_secret = con_data['oauth_token_secret']
+                    self.service.authorize_url = con_data['authorize_url']
+                    self.verifier = con_data['verifier']
+                    self.session = OAuth1Session(**json.loads(json.dumps(con_data['session'])))
                 return True
             return False
 
@@ -179,25 +102,26 @@ class Etrader():
             '''Write session parameters to disk if caching is enabled'''
             if os.path.isfile(self.cache_file):
                 os.remove(self.cache_file)
-            with open(self.cache_file, 'w') as outfile:
-                outfile.write(json.dumps({'oauth_token': self.oauth_token,
+            with open(self.cache_file, 'wb') as outfile:
+                con_param = {'oauth_token': self.oauth_token,
                            'oauth_token_secret': self.oauth_token_secret,
                            'authorize_url': self.service.authorize_url,
                            'verifier': self.verifier,
                            'session': {'consumer_key': self.session.consumer_key,
                                        'consumer_secret': self.session.consumer_secret,
                                        'access_token': self.session.access_token,
-                                       'access_token_secret': self.session.access_token_secret}}))
+                                       'access_token_secret': self.session.access_token_secret}}
+                outfile.write(msgpack.packb(con_param))
             return
 
-        if not self.use_cached_session: # if not caching sessions, always get new token and never write to disk
+        if not self.use_cached_session:  # if not caching sessions, always get new token and never write to disk
             __new_authorization()
             return
-        elif __retrieve_connection_cache(): # If using cache, test current values by attempting to renew previous token
+        elif __retrieve_connection_cache():  # If using cache, test current values by attempting to renew previous token
             __test_connection()
-        else: # If token renewal fails, session has expired, so go through new authorization
+        else:  # If token renewal fails, session has expired, so go through new authorization
             __new_authorization()
-        __set_connection_cache() # write connection parameters to disk and update class variables with renewed or new session
+        __set_connection_cache()  # write connection parameters to disk and update class variables with renewed or new session
         return
 
     def check_token(self):
@@ -262,7 +186,13 @@ class Etrader():
     def renew_accesss_token(self):
         '''renew_access_token'''
         self._session_start_time = datetime.now()
+        print('renewed')
         return self.session.get(self.__renew_access_token_url)
+
+    def auto_renew_token(self):
+        while True:
+            self.check_token()
+            time.sleep(3600)  # check token every hour (3600 seconds)
 
     def revoke_accesss_token(self):
         '''revoke_access_token'''
@@ -293,14 +223,12 @@ class Etrader():
             self.current_account.update_account_list(account_lst)
             return
 
-        self.check_token()
         __get_list()
         __populate_holdings()
         return self.account_list
 
     def get_account_balance(self, account_id=None):
         '''Get all account balances'''
-        self.check_token()
         if account_id is not None:
             self.current_account.set_by_id(account_id)
         account_id_key = self.current_account.id_key
@@ -315,7 +243,6 @@ class Etrader():
 
     def get_account_positions(self, account_id=None):
         '''Get account positions'''
-        self.check_token()
         if account_id is not None:
             self.current_account.set_by_id(account_id)
         end_pt = "v1/accounts"
@@ -325,7 +252,6 @@ class Etrader():
 
     def get_account_transaction_history(self, account_id=None, ticker_symbol=None):
         '''Get Transaction History'''
-        self.check_token()
         if account_id is not None:
             self.current_account.set_by_id(account_id)
         end_pt = "v1/accounts"
@@ -337,7 +263,6 @@ class Etrader():
         '''Get Transaction History'''
         if transaction_id is None:
             return []
-        self.check_token()
         if account_id is not None:
             self.current_account.set_by_id(account_id)
         end_pt = "v1/accounts"
@@ -347,7 +272,6 @@ class Etrader():
 
     def get_market_quote(self, stock_ticker):
         '''Get market quote for provided stock ticker'''
-        self.check_token()
         if not isinstance(stock_ticker, list):
             stock_ticker = [stock_ticker]
         stock_ticker = ','.join(stock_ticker)
@@ -358,13 +282,96 @@ class Etrader():
 
     def get_existing_orders(self, account_id=None):
         '''Get existing orders in account'''
-        self.check_token()
         if account_id is not None:
             self.current_account.set_by_id(account_id)
         end_pt = "v1/accounts"
         api_url = "%s/%s/%s/orders.json" % (self.__base_url, end_pt, self.current_account.id_key)
         req = self.session.get(api_url)
         return req.json()['OrdersResponse']['Order']
+
+    class __CurrentAccount(object):
+        def __init__(self, account_list=None):
+            self.id = None
+            self.id_key = None
+            self.description = None
+            self.mode = None
+            self.name = None
+            self.status = None
+            self.type = None
+            self.institution_type = None
+            self.closed_date = None
+            self.cash_available = None
+            self.positions = None
+            self.total_account_value = None
+            self.__account_list = account_list
+
+        def __call__(self):
+            return self.get()
+
+        def get(self):
+            return {'id': self.id, 'id_key': self.id_key, 'description': self.description, 'mode': self.mode,
+                    'name': self.name, 'status': self.status, 'type': self.type,
+                    'institution_type': self.institution_type, 'closed_date': self.closed_date,
+                    'cash_available': self.cash_available, 'total_account_value': self.total_account_value,
+                    'positions': self.positions}
+
+        def set(self, account_dict):
+            self.id = account_dict['accountId'] if 'accountId' in account_dict else None
+            self.id_key = account_dict['accountIdKey'] if 'accountIdKey' in account_dict else None
+            self.description = account_dict['accountDesc'] if 'accountDesc' in account_dict else None
+            self.mode = account_dict['accountMode'] if 'accountMode' in account_dict else None
+            self.name = account_dict['accountName'] if 'accountName' in account_dict else None
+            self.status = account_dict['accountStatus'] if 'accountStatus' in account_dict else None
+            self.type = account_dict['accountType'] if 'accountType' in account_dict else None
+            self.institution_type = account_dict['institutionType'] if 'institutionType' in account_dict else None
+            self.closed_date = account_dict['closedDate'] if 'closedDate' in account_dict else None
+            if 'cashAvailable' in account_dict:
+                self.cash_available = account_dict['cashAvailable']
+            if 'positions' in account_dict:
+                self.positions = account_dict['positions']
+            if 'totalAccountValue' in account_dict:
+                self.total_account_value = account_dict['totalAccountValue']
+            return
+
+        def set_by_id(self, id):
+            account_dict = None
+            idx = 0
+            for i in range(len(self.__account_list)):
+                if self.__account_list[i]['accountId'] == id:
+                    account_dict = self.__account_list[i]
+                    idx = i
+                    break
+            if account_dict is None:
+                raise ValueError(f'Invalid account ID: {id}')
+            else:
+                self.set(self.__account_list[idx])
+            return
+
+        def set_by_id_key(self, id_key):
+            account_dict = None
+            idx = 0
+            for i in range(len(self.__account_list)):
+                if self.__account_list[i]['accountIdKey'] == id_key:
+                    account_dict = self.__account_list[i]
+                    idx = i
+                    break
+            if account_dict is None:
+                raise ValueError(f'Invalid account ID Key: {id_key}')
+            else:
+                self.set(self.__account_list[idx])
+            return
+
+        def set_by_index(self, index):
+            try:
+                self.set(self.__account_list[index])
+            except Exception as e:
+                raise ValueError(
+                    f'Account index is out of range. Expecting value between 0 and {len(self.__account_list)}')
+            return
+
+        def update_account_list(self, account_list):
+            self.__account_list = account_list
+            return
 
 if __name__ == '__main__':
     # Automated Login
